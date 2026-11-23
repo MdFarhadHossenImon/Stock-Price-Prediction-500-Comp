@@ -15,12 +15,12 @@ The main goal of this project is to apply AI concepts in a real-world financial 
 
 This repository contains a machine learning-based stock price prediction system designed to forecast S&P 500 closing prices for up to **30 business days**.
 
-The Streamlit application lets users select from 503 S&P 500 symbols, review recent price history, and generate forecasts using a Random Forest model trained on historical OHLCV data.
+The Streamlit application lets users select from 503 S&P 500 symbols, review recent price history, and generate forecasts using a Random Forest model trained on historical close-to-close returns.
 
 The project includes:
 
 * 📊 Data preprocessing and cleaning
-* 🤖 Random Forest model training with lag and rolling-average features
+* 🤖 Random Forest model training with past-return, momentum, and volatility features
 * 📈 Stock trend visualization
 * 🌐 Interactive Streamlit web application
 * 🔮 Future stock price prediction
@@ -136,7 +136,7 @@ Stock-Price-Prediction-500-Comp/
 
 The application uses `new dataset stock/sp500_stocks.csv`, a daily OHLCV dataset covering 2000 through 2026 for 503 S&P 500 symbols. The approximately 290 MB stock file is stored with Git LFS; `sp500_companies.csv` provides company names for the selector.
 
-The app loads the selected symbol's price history, creates lag and rolling-average features, trains a Random Forest regressor, and reports validation mean absolute error. Forecasts are generated recursively for business days.
+The app loads the selected symbol's closing prices, creates features using past returns only, and trains a Random Forest regressor to predict one-day returns. It compares the model's validation mean absolute error against a previous-close baseline, then recursively generates forecasts for business days.
 
 ---
 

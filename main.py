@@ -1,10 +1,10 @@
 import streamlit as st
+import numpy as np
 import pandas as pd
 from datetime import timedelta
 from pathlib import Path
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error
-from sklearn.model_selection import train_test_split
 import plotly.graph_objects as go
 
 st.set_page_config(
@@ -17,10 +17,8 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
-
         html, body, [class*="css"] {
-            font-family: "DM Sans", "Segoe UI", sans-serif;
+            font-family: "Segoe UI", Arial, sans-serif;
         }
 
         .stApp {
@@ -101,7 +99,7 @@ st.markdown(
 
         [data-testid="stMetricLabel"] {
             color: #667085;
-            font-size: 0.82rem;
+            font-size: 0.9rem;
             font-weight: 600;
         }
 
@@ -112,7 +110,8 @@ st.markdown(
         }
 
         [data-testid="stMetricDelta"] {
-            color: #027a48;
+            color: #027a48 !important;
+            background: #ecfdf3;
         }
 
         [data-testid="stPlotlyChart"] {
@@ -195,67 +194,76 @@ symbol_data = (
 )
 symbol_data = symbol_data.sort_values("date").reset_index(drop=True)
 
-feature_data = symbol_data.copy()
-feature_data["lag_1"] = feature_data["close"].shift(1)
-feature_data["lag_2"] = feature_data["close"].shift(2)
-feature_data["lag_5"] = feature_data["close"].shift(5)
-feature_data["lag_20"] = feature_data["close"].shift(20)
-feature_data["rolling_mean_5"] = feature_data["close"].shift(1).rolling(5).mean()
-feature_data["rolling_mean_20"] = feature_data["close"].shift(1).rolling(20).mean()
-feature_data["volume"] = feature_data["volume"].fillna(feature_data["volume"].median())
+daily_returns = symbol_data["close"].pct_change()
+feature_data = pd.DataFrame({
+    "target_return": daily_returns,
+    "previous_close": symbol_data["close"].shift(1),
+    "target_close": symbol_data["close"],
+})
+
+return_lags = [1, 2, 3, 5, 10, 20]
+for lag in return_lags:
+    feature_data[f"return_lag_{lag}"] = daily_returns.shift(lag)
+
+feature_data["momentum_5"] = symbol_data["close"].shift(1) / symbol_data["close"].shift(6) - 1
+feature_data["momentum_20"] = symbol_data["close"].shift(1) / symbol_data["close"].shift(21) - 1
+feature_data["volatility_5"] = daily_returns.shift(1).rolling(5).std()
+feature_data["volatility_20"] = daily_returns.shift(1).rolling(20).std()
+feature_data = feature_data.replace([np.inf, -np.inf], np.nan).dropna()
 
 features = [
-    "open", "high", "low", "volume",
-    "lag_1", "lag_2", "lag_5", "lag_20",
-    "rolling_mean_5", "rolling_mean_20",
+    *(f"return_lag_{lag}" for lag in return_lags),
+    "momentum_5",
+    "momentum_20",
+    "volatility_5",
+    "volatility_20",
 ]
-feature_data = feature_data.dropna(subset=features + ["close"])
-
 X = feature_data[features]
-y = feature_data["close"]
+y = feature_data["target_return"]
 split_index = int(len(feature_data) * 0.8)
 X_train, X_val = X.iloc[:split_index], X.iloc[split_index:]
 y_train, y_val = y.iloc[:split_index], y.iloc[split_index:]
 
 model = RandomForestRegressor(
-    n_estimators=100,
+    n_estimators=200,
+    min_samples_leaf=max(2, min(20, len(X_train) // 20)),
+    max_features=0.8,
     random_state=42,
     n_jobs=-1,
 )
 model.fit(X_train, y_train)
 
-val_predictions = model.predict(X_val)
-mae = mean_absolute_error(y_val, val_predictions)
+validation_previous_close = feature_data["previous_close"].iloc[split_index:]
+validation_actual_close = feature_data["target_close"].iloc[split_index:]
+validation_returns = model.predict(X_val)
+validation_predictions = validation_previous_close * (1 + validation_returns)
+mae = mean_absolute_error(validation_actual_close, validation_predictions)
+baseline_mae = mean_absolute_error(validation_actual_close, validation_previous_close)
 
 last_known_date = symbol_data["date"].iloc[-1]
 future_dates = pd.bdate_range(start=last_known_date + timedelta(days=1), periods=future_days)
 
 history_close = symbol_data["close"].tolist()
-latest = symbol_data.iloc[-1]
+last_historical_close = float(history_close[-1])
+history_returns = daily_returns.dropna().tolist()
 future_predictions = []
 
-for forecast_date in future_dates:
-    lag_1 = history_close[-1]
-    lag_2 = history_close[-2] if len(history_close) >= 2 else lag_1
-    lag_5 = history_close[-5] if len(history_close) >= 5 else lag_1
-    lag_20 = history_close[-20] if len(history_close) >= 20 else lag_1
+for _ in future_dates:
+    input_features = {
+        f"return_lag_{lag}": history_returns[-lag]
+        for lag in return_lags
+    }
+    input_features["momentum_5"] = history_close[-1] / history_close[-6] - 1
+    input_features["momentum_20"] = history_close[-1] / history_close[-21] - 1
+    input_features["volatility_5"] = pd.Series(history_returns[-5:]).std()
+    input_features["volatility_20"] = pd.Series(history_returns[-20:]).std()
+    input_row = pd.DataFrame([input_features], columns=features)
 
-    input_row = pd.DataFrame([{
-        "open": latest["open"],
-        "high": latest["high"],
-        "low": latest["low"],
-        "volume": latest["volume"],
-        "lag_1": lag_1,
-        "lag_2": lag_2,
-        "lag_5": lag_5,
-        "lag_20": lag_20,
-        "rolling_mean_5": sum(history_close[-5:]) / min(5, len(history_close)),
-        "rolling_mean_20": sum(history_close[-20:]) / min(20, len(history_close)),
-    }])
-
-    predicted_close = float(model.predict(input_row)[0])
+    predicted_return = float(model.predict(input_row)[0])
+    predicted_close = history_close[-1] * (1 + predicted_return)
     future_predictions.append(predicted_close)
     history_close.append(predicted_close)
+    history_returns.append(predicted_return)
 
 fig = go.Figure()
 
@@ -276,12 +284,12 @@ fig.add_trace(go.Scatter(
 ))
 
 fig.add_trace(go.Scatter(
-    x=future_dates,
-    y=future_predictions,
+    x=[last_known_date, *future_dates],
+    y=[last_historical_close, *future_predictions],
     mode="lines+markers",
     name="Forecast",
-    line=dict(color="#12b76a", width=2.5, dash="dot"),
-    marker=dict(size=7, color="#12b76a", line=dict(width=1, color="white")),
+    line=dict(color="#b54708", width=3),
+    marker=dict(size=7, color="#b54708", line=dict(width=1, color="white")),
 ))
 
 fig.update_layout(
@@ -302,15 +310,28 @@ fig.update_layout(
         y=1.02,
         xanchor="right",
         x=1,
+        font=dict(size=14, color="#344054"),
     ),
     hovermode="x unified",
     plot_bgcolor="white",
     paper_bgcolor="white",
-    font=dict(family="DM Sans, Segoe UI, sans-serif", color="#475467"),
+    font=dict(family="Segoe UI, Arial, sans-serif", color="#344054", size=14),
 )
 
-fig.update_xaxes(showgrid=False, showline=True, linecolor="#eaecf0")
-fig.update_yaxes(showgrid=True, gridcolor="#f2f4f7", zeroline=False)
+fig.update_xaxes(
+    showgrid=False,
+    showline=True,
+    linecolor="#d0d5dd",
+    tickfont=dict(size=13, color="#475467"),
+    title_font=dict(size=14, color="#344054"),
+)
+fig.update_yaxes(
+    showgrid=True,
+    gridcolor="#eaecf0",
+    zeroline=False,
+    tickfont=dict(size=13, color="#475467"),
+    title_font=dict(size=14, color="#344054"),
+)
 
 st.markdown(
     """
@@ -325,18 +346,22 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-latest_price = float(symbol_data["close"].iloc[-1])
+latest_price = last_historical_close
 forecast_price = float(future_predictions[-1])
 forecast_change = ((forecast_price - latest_price) / latest_price) * 100
 
-metric_col1, metric_col2, metric_col3 = st.columns(3)
+metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
 metric_col1.metric("Latest close", f"${latest_price:,.2f}")
 metric_col2.metric(
     f"{future_days}-day forecast",
     f"${forecast_price:,.2f}",
     f"{forecast_change:+.2f}%",
 )
-metric_col3.metric("Validation MAE", f"${mae:,.2f}")
+metric_col3.metric("Model 1-day MAE", f"${mae:,.2f}")
+metric_col4.metric("No-change MAE", f"${baseline_mae:,.2f}")
+
+if mae >= baseline_mae:
+    st.caption("The model did not beat the previous-close baseline in this validation period.")
 
 st.markdown("")
-st.plotly_chart(fig, width="stretch")
+st.plotly_chart(fig, width="stretch", theme=None)
